@@ -3,13 +3,12 @@ import os
 import re
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 import MySQLdb.cursors
 from flask import Flask, jsonify, request
 from flask_mysqldb import MySQL
 from werkzeug.exceptions import RequestEntityTooLarge
-from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 
@@ -61,54 +60,15 @@ SYMPTOMS_SEED = [
     ("Stomach Ache", "gastro", "Normal"),
 ]
 
-DOCTORS_SEED = [
-    (
-        "Dr. Sarah Johnson",
-        "Cardiologist",
-        "12 Years Experience",
-        "https://images.unsplash.com/photo-1559839734-2b71ea197ec2?auto=format&fit=crop&q=80&w=400",
-        4.9,
-    ),
-    (
-        "Dr. James Wilson",
-        "Neurologist",
-        "15 Years Experience",
-        "https://images.unsplash.com/photo-1612349317150-e413f6a5b16d?auto=format&fit=crop&q=80&w=400",
-        4.8,
-    ),
-    (
-        "Dr. Emily Chen",
-        "Pediatrician",
-        "8 Years Experience",
-        "https://images.unsplash.com/photo-1594824476967-48c8b964273f?auto=format&fit=crop&q=80&w=400",
-        4.9,
-    ),
-    (
-        "Dr. Michael Brown",
-        "Orthopedic Surgeon",
-        "20 Years Experience",
-        "https://images.unsplash.com/photo-1622253692010-333f2da6031d?auto=format&fit=crop&q=80&w=400",
-        4.7,
-    ),
-]
-
-VERIFIED_DOCTERS_SEED = [
-    ("dr.sarah", "Dr. Sarah Johnson", "cardio", "doctor@123"),
-    ("dr.james", "Dr. James Wilson", "gen-med", "doctor@123"),
-    ("dr.emily", "Dr. Emily Chen", "dental", "doctor@123"),
-    ("dr.michael", "Dr. Michael Brown", "ortho", "doctor@123"),
-    ("dr.priya", "Dr. Priya Raman", "derma", "doctor@123"),
-]
-
 TESTIMONIALS_SEED = [
     (
         "Robert Fox",
-        "The smart queue system saved me hours of waiting. Highly recommended!",
+        "The symptom checker and health record section made everything very easy. Highly recommended!",
         5,
     ),
     (
         "Jane Cooper",
-        "Very professional doctors and the digital token system is a game changer.",
+        "The digital tools are simple and helpful, especially the precision medicine section.",
         5,
     ),
     ("Esther Howard", "Emergency guidance helped us when we were in panic. Great app.", 4),
@@ -446,16 +406,6 @@ def parse_int(value, default=0):
         return default
 
 
-def parse_date(value):
-    if not value:
-        return date.today()
-
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d").date()
-    except ValueError:
-        return date.today()
-
-
 def serialize_department(row):
     return {
         "id": row["id"],
@@ -473,17 +423,6 @@ def serialize_symptom(row):
         "departmentId": row["department_id"],
         "department": row["department_name"],
         "urgency": row["urgency"],
-    }
-
-
-def serialize_doctor(row):
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "specialty": row["specialty"],
-        "experience": row["experience"],
-        "image": row["image"],
-        "rating": float(row["rating"]),
     }
 
 
@@ -509,36 +448,6 @@ def serialize_patient(row):
         "bloodGroup": row["blood_group"] or "",
         "allergies": row["allergies"] or "",
         "chronicConditions": row["chronic_conditions"] or "",
-    }
-
-
-def serialize_appointment(row):
-    appointment_date = row.get("appointment_date")
-    created_at = row.get("created_at")
-
-    return {
-        "id": row["id"],
-        "patientName": row["patient_name"],
-        "age": row["age"],
-        "symptom": row["symptom"],
-        "department": row["department_id"],
-        "departmentName": row.get("department_name") or row["department_id"],
-        "date": appointment_date.isoformat() if appointment_date else None,
-        "estimatedTime": row["estimated_time"],
-        "urgency": row["urgency"],
-        "tokenNumber": row["token_number"],
-        "status": row["status"],
-        "createdAt": created_at.isoformat() if created_at else None,
-    }
-
-
-def serialize_verified_docter(row):
-    return {
-        "id": row["id"],
-        "username": row["username"],
-        "name": row["doctor_name"],
-        "departmentId": row["department_id"],
-        "departmentName": row.get("department_name") or row["department_id"],
     }
 
 
@@ -1137,31 +1046,6 @@ def upsert_patient(data):
     )
 
 
-def get_or_create_patient_for_appointment(patient_name, age, contact):
-    contact_for_db = contact if contact else None
-
-    if contact_for_db:
-        existing = fetch_one("SELECT id FROM patients WHERE contact = %s", (contact_for_db,))
-        if existing:
-            execute_query(
-                """
-                UPDATE patients
-                SET name = %s, age = %s
-                WHERE id = %s
-                """,
-                (patient_name, age, existing["id"]),
-            )
-            return existing["id"]
-
-    return execute_query(
-        """
-        INSERT INTO patients (name, age, contact)
-        VALUES (%s, %s, %s)
-        """,
-        (patient_name, age, contact_for_db),
-    )
-
-
 def initialize_database():
     cursor = mysql.connection.cursor()
 
@@ -1184,34 +1068,6 @@ def initialize_database():
             symptom VARCHAR(200) NOT NULL UNIQUE,
             department_id VARCHAR(50) NOT NULL,
             urgency VARCHAR(20) NOT NULL DEFAULT 'Normal',
-            FOREIGN KEY (department_id) REFERENCES departments(id)
-        )
-        """
-    )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS doctors (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(120) NOT NULL UNIQUE,
-            specialty VARCHAR(120) NOT NULL,
-            experience VARCHAR(120) NOT NULL,
-            image TEXT,
-            rating DECIMAL(2,1) NOT NULL DEFAULT 4.5
-        )
-        """
-    )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS verified_docters (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(80) NOT NULL UNIQUE,
-            password_hash VARCHAR(255) NOT NULL,
-            doctor_name VARCHAR(120) NOT NULL,
-            department_id VARCHAR(50) NOT NULL,
-            is_active TINYINT(1) NOT NULL DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (department_id) REFERENCES departments(id)
         )
         """
@@ -1248,29 +1104,6 @@ def initialize_database():
 
     cursor.execute(
         """
-        CREATE TABLE IF NOT EXISTS appointments (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            patient_id INT NULL,
-            patient_name VARCHAR(120) NOT NULL,
-            age INT,
-            symptom TEXT,
-            department_id VARCHAR(50) NOT NULL,
-            appointment_date DATE NOT NULL,
-            contact VARCHAR(40),
-            estimated_time VARCHAR(20) NOT NULL DEFAULT '20 mins',
-            urgency VARCHAR(20) NOT NULL DEFAULT 'Normal',
-            token_number VARCHAR(20) NOT NULL,
-            status VARCHAR(20) NOT NULL DEFAULT 'Pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE SET NULL,
-            FOREIGN KEY (department_id) REFERENCES departments(id)
-        )
-        """
-    )
-
-    cursor.execute(
-        """
         CREATE TABLE IF NOT EXISTS pharmacogenomic_reports (
             id INT AUTO_INCREMENT PRIMARY KEY,
             patient_id VARCHAR(80) NOT NULL,
@@ -1282,6 +1115,10 @@ def initialize_database():
         )
         """
     )
+
+    cursor.execute("DROP TABLE IF EXISTS verified_docters")
+    cursor.execute("DROP TABLE IF EXISTS doctors")
+    cursor.execute("DROP TABLE IF EXISTS appointments")
 
     mysql.connection.commit()
     cursor.close()
@@ -1300,25 +1137,6 @@ def initialize_database():
         VALUES (%s, %s, %s)
         """,
         SYMPTOMS_SEED,
-    )
-
-    execute_many(
-        """
-        INSERT IGNORE INTO doctors (name, specialty, experience, image, rating)
-        VALUES (%s, %s, %s, %s, %s)
-        """,
-        DOCTORS_SEED,
-    )
-
-    execute_many(
-        """
-        INSERT IGNORE INTO verified_docters (username, password_hash, doctor_name, department_id)
-        VALUES (%s, %s, %s, %s)
-        """,
-        [
-            (username, generate_password_hash(password), doctor_name, department_id)
-            for username, doctor_name, department_id, password in VERIFIED_DOCTERS_SEED
-        ],
     )
 
     execute_many(
@@ -1369,14 +1187,6 @@ def get_reference_data():
         """
     )
 
-    doctors = fetch_all(
-        """
-        SELECT id, name, specialty, experience, image, rating
-        FROM doctors
-        ORDER BY id
-        """
-    )
-
     testimonials = fetch_all(
         """
         SELECT id, name, comment, rating
@@ -1389,7 +1199,6 @@ def get_reference_data():
         {
             "departments": [serialize_department(row) for row in departments],
             "symptoms": [serialize_symptom(row) for row in symptoms],
-            "doctors": [serialize_doctor(row) for row in doctors],
             "testimonials": [serialize_testimonial(row) for row in testimonials],
         }
     )
@@ -1495,53 +1304,6 @@ def analyze_pharmacogenomics():
     return jsonify(response_payload)
 
 
-@app.route("/api/queue", methods=["GET"])
-def get_queue():
-    departments = fetch_all(
-        """
-        SELECT id, name, icon, active_doctors, average_wait_time
-        FROM departments
-        ORDER BY name
-        """
-    )
-
-    today = date.today()
-    queue_data = []
-
-    for dept in departments:
-        waiting_row = fetch_one(
-            """
-            SELECT COUNT(*) AS total
-            FROM appointments
-            WHERE department_id = %s
-              AND appointment_date = %s
-              AND status IN ('Pending', 'In Progress')
-            """,
-            (dept["id"], today),
-        )
-
-        served_row = fetch_one(
-            """
-            SELECT COUNT(*) AS total
-            FROM appointments
-            WHERE department_id = %s
-              AND appointment_date = %s
-              AND status = 'Completed'
-            """,
-            (dept["id"], today),
-        )
-
-        queue_data.append(
-            {
-                **serialize_department(dept),
-                "currentToken": parse_int(served_row["total"], 0) + 1,
-                "totalWaiting": parse_int(waiting_row["total"], 0),
-            }
-        )
-
-    return jsonify({"queue": queue_data})
-
-
 @app.route("/api/patients/latest", methods=["GET"])
 def get_latest_patient():
     row = fetch_one(
@@ -1573,200 +1335,8 @@ def save_patient():
     return jsonify({"patient": serialize_patient(row)})
 
 
-@app.route("/api/appointments", methods=["GET"])
-def get_appointments():
-    rows = fetch_all(
-        """
-        SELECT
-            a.id,
-            a.patient_name,
-            a.age,
-            a.symptom,
-            a.department_id,
-            a.appointment_date,
-            a.estimated_time,
-            a.urgency,
-            a.token_number,
-            a.status,
-            a.created_at,
-            d.name AS department_name
-        FROM appointments a
-        LEFT JOIN departments d ON d.id = a.department_id
-        ORDER BY a.created_at DESC
-        """
-    )
-
-    return jsonify({"appointments": [serialize_appointment(row) for row in rows]})
-
-
-@app.route("/api/docter/login", methods=["POST"])
-@app.route("/api/doctor/login", methods=["POST"])
-def doctor_login():
-    data = request.get_json(silent=True) or {}
-    username = str(data.get("username", "")).strip().lower()
-    password = str(data.get("password", ""))
-
-    if not username or not password:
-        return jsonify({"error": "username and password are required"}), 400
-
-    row = fetch_one(
-        """
-        SELECT
-            vd.id,
-            vd.username,
-            vd.password_hash,
-            vd.doctor_name,
-            vd.department_id,
-            d.name AS department_name
-        FROM verified_docters vd
-        LEFT JOIN departments d ON d.id = vd.department_id
-        WHERE vd.username = %s AND vd.is_active = 1
-        LIMIT 1
-        """,
-        (username,),
-    )
-
-    if not row or not check_password_hash(row["password_hash"], password):
-        return jsonify({"error": "Invalid credentials"}), 401
-
-    return jsonify({"doctor": serialize_verified_docter(row)})
-
-
-@app.route("/api/appointments", methods=["POST"])
-def create_appointment():
-    data = request.get_json(silent=True) or {}
-
-    patient_name = str(data.get("patientName", "")).strip()
-    age = parse_int(data.get("age"), 0)
-    symptom = str(data.get("symptom", "")).strip()
-    department_id = str(data.get("department", "")).strip()
-    contact = str(data.get("contact", "")).strip()
-    urgency = str(data.get("urgency") or "Normal")
-
-    if not patient_name or not department_id or not symptom:
-        return jsonify({"error": "patientName, department and symptom are required"}), 400
-
-    department = fetch_one("SELECT id, average_wait_time FROM departments WHERE id = %s", (department_id,))
-    if not department:
-        return jsonify({"error": "Invalid department"}), 400
-
-    appointment_date = parse_date(data.get("date"))
-
-    patient_id = get_or_create_patient_for_appointment(patient_name, age, contact)
-
-    token_count_row = fetch_one(
-        """
-        SELECT COUNT(*) AS total
-        FROM appointments
-        WHERE department_id = %s AND appointment_date = %s
-        """,
-        (department_id, appointment_date),
-    )
-
-    token_sequence = parse_int(token_count_row["total"], 0) + 1
-    token_prefix = department_id[:2].upper()
-    token_number = f"{token_prefix}-{token_sequence:03d}"
-    estimated_time = f"{parse_int(department['average_wait_time'], 20)} mins"
-
-    appointment_id = execute_query(
-        """
-        INSERT INTO appointments (
-            patient_id,
-            patient_name,
-            age,
-            symptom,
-            department_id,
-            appointment_date,
-            contact,
-            estimated_time,
-            urgency,
-            token_number,
-            status
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending')
-        """,
-        (
-            patient_id,
-            patient_name,
-            age,
-            symptom,
-            department_id,
-            appointment_date,
-            contact if contact else None,
-            estimated_time,
-            urgency,
-            token_number,
-        ),
-    )
-
-    row = fetch_one(
-        """
-        SELECT
-            a.id,
-            a.patient_name,
-            a.age,
-            a.symptom,
-            a.department_id,
-            a.appointment_date,
-            a.estimated_time,
-            a.urgency,
-            a.token_number,
-            a.status,
-            a.created_at,
-            d.name AS department_name
-        FROM appointments a
-        LEFT JOIN departments d ON d.id = a.department_id
-        WHERE a.id = %s
-        """,
-        (appointment_id,),
-    )
-
-    return jsonify({"appointment": serialize_appointment(row)}), 201
-
-
-@app.route("/api/appointments/<int:appointment_id>/status", methods=["PATCH"])
-def update_appointment_status(appointment_id):
-    data = request.get_json(silent=True) or {}
-    status = str(data.get("status", "")).strip()
-
-    allowed_statuses = {"Pending", "In Progress", "Completed", "Cancelled"}
-    if status not in allowed_statuses:
-        return jsonify({"error": "Invalid status"}), 400
-
-    existing = fetch_one("SELECT id FROM appointments WHERE id = %s", (appointment_id,))
-    if not existing:
-        return jsonify({"error": "Appointment not found"}), 404
-
-    execute_query("UPDATE appointments SET status = %s WHERE id = %s", (status, appointment_id))
-
-    row = fetch_one(
-        """
-        SELECT
-            a.id,
-            a.patient_name,
-            a.age,
-            a.symptom,
-            a.department_id,
-            a.appointment_date,
-            a.estimated_time,
-            a.urgency,
-            a.token_number,
-            a.status,
-            a.created_at,
-            d.name AS department_name
-        FROM appointments a
-        LEFT JOIN departments d ON d.id = a.department_id
-        WHERE a.id = %s
-        """,
-        (appointment_id,),
-    )
-
-    return jsonify({"appointment": serialize_appointment(row)})
-
-
 @app.route("/api/demo/reset", methods=["POST"])
 def reset_demo_data():
-    execute_query("DELETE FROM appointments")
     execute_query("DELETE FROM patients")
 
     return jsonify({"message": "Demo data reset complete"})
@@ -1790,4 +1360,6 @@ def emergency_legacy():
 if __name__ == "__main__":
     with app.app_context():
         ensure_database_initialized()
-    app.run(debug=True)
+    port = int(os.getenv("PORT", "5000"))
+    debug = os.getenv("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)
