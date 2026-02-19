@@ -6,7 +6,7 @@ Backend service for PulsePoint healthcare workflows and PharmaGuard pharmacogeno
 `PulsePoint Backend API`
 
 ## Deployed Link
-- Live Backend URL: `https://YOUR-BACKEND-DEPLOYMENT-URL`
+- Live Backend URL: https://plusepoint-backend-deployment.onrender.com
 - Main Repository: `https://github.com/GururajAchar2008/PlusePoint.git`
 
 Replace the placeholder with your deployed backend API URL.
