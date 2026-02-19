@@ -752,19 +752,106 @@ def build_clinical_recommendation(drug, risk_label, phenotype, recommendation, c
     }
 
 
+def extract_first_json_object(raw_text):
+    cleaned = str(raw_text or "").strip()
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        return json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def normalize_string_list(raw_value, fallback, max_items=6):
+    if not isinstance(raw_value, list):
+        return fallback
+
+    normalized = []
+    for item in raw_value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        normalized.append(text)
+        if len(normalized) >= max_items:
+            break
+
+    return normalized or fallback
+
+
+def build_ai_suggestions(drug, risk_label, phenotype, recommendation):
+    risk_specific = {
+        "Safe": [
+            "Proceed with standard dosing and routine follow-up.",
+            "Counsel the patient to report any unexpected adverse effects early.",
+        ],
+        "Adjust Dosage": [
+            "Start with a genotype-informed dose adjustment and monitor response closely.",
+            "Reassess therapy after initial dosing period using clinical/lab indicators.",
+        ],
+        "Toxic": [
+            "Avoid standard dosing and prioritize safer alternatives when feasible.",
+            "If treatment is required, use specialist-guided reduced dosing with close monitoring.",
+        ],
+        "Ineffective": [
+            "Prioritize alternative therapy with better expected response for this genotype.",
+            "Monitor treatment goals early to prevent therapeutic delay.",
+        ],
+        "Unknown": [
+            "Use conservative prescribing with close follow-up until more genotype data is available.",
+            "Consider confirmatory pharmacogenomic testing before dose escalation.",
+        ],
+    }
+
+    suggestions = [
+        recommendation,
+        f"Document pharmacogenomic profile for {drug} ({phenotype}) in the patient record.",
+    ]
+    suggestions.extend(risk_specific.get(risk_label, risk_specific["Unknown"]))
+    suggestions.append("Coordinate final medication decisions with a licensed clinician.")
+
+    seen = set()
+    deduped = []
+    for item in suggestions:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    return deduped[:6]
+
+
 def try_external_llm_explanation(context, fallback_payload):
     use_external = str(os.getenv("PHARMAGUARD_USE_LLM", "false")).lower() in {"1", "true", "yes"}
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not use_external or not api_key:
         return fallback_payload
 
-    model = os.getenv("PHARMAGUARD_LLM_MODEL", "gpt-4o-mini")
-    api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
+    model = os.getenv("PHARMAGUARD_LLM_MODEL", "openrouter/aurora-alpha")
+    api_url = os.getenv("OPENAI_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+    openrouter_site_url = os.getenv("OPENROUTER_SITE_URL", "").strip()
+    openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "PulsePoint PharmaGuard").strip()
 
     prompt = (
         "You are a clinical pharmacogenomics assistant. Produce concise JSON with keys: "
-        "summary, biological_mechanism, variant_significance, clinical_impact, citations. "
-        "Use only evidence in the context. Avoid hallucinations.\n\n"
+        "summary, biological_mechanism, variant_significance, clinical_impact, citations, care_team_suggestions. "
+        "Use only evidence in the context. Avoid hallucinations. "
+        "care_team_suggestions must be an array of 3 to 6 short actionable sentences.\n\n"
         f"Context: {json.dumps(context)}"
     )
 
@@ -784,13 +871,20 @@ def try_external_llm_explanation(context, fallback_payload):
         "max_tokens": 350,
     }
 
+    request_headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if "openrouter.ai" in api_url:
+        if openrouter_site_url:
+            request_headers["HTTP-Referer"] = openrouter_site_url
+        if openrouter_app_name:
+            request_headers["X-Title"] = openrouter_app_name
+
     req = urllib.request.Request(
         api_url,
         data=json.dumps(request_body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=request_headers,
         method="POST",
     )
 
@@ -806,7 +900,7 @@ def try_external_llm_explanation(context, fallback_payload):
             if not model_text:
                 return fallback_payload
 
-            parsed = json.loads(model_text)
+            parsed = extract_first_json_object(model_text)
             if not isinstance(parsed, dict):
                 return fallback_payload
 
@@ -815,11 +909,20 @@ def try_external_llm_explanation(context, fallback_payload):
                 "biological_mechanism",
                 "variant_significance",
                 "clinical_impact",
-                "citations",
             }
             if not required_keys.issubset(parsed.keys()):
                 return fallback_payload
 
+            parsed["citations"] = normalize_string_list(
+                parsed.get("citations"),
+                fallback_payload["citations"],
+                max_items=8,
+            )
+            parsed["care_team_suggestions"] = normalize_string_list(
+                parsed.get("care_team_suggestions"),
+                fallback_payload["care_team_suggestions"],
+                max_items=6,
+            )
             parsed["model"] = model
             return parsed
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
@@ -835,6 +938,8 @@ def generate_explanation(drug, primary_gene, diplotype, phenotype, risk_label, v
 
     if not variant_citations:
         variant_citations.append("No actionable pharmacogenomic variant annotations detected for this gene.")
+
+    fallback_suggestions = build_ai_suggestions(drug, risk_label, phenotype, recommendation)
 
     mechanism_lookup = {
         "CYP2D6": "CYP2D6 converts codeine into active morphine. Altered enzyme activity changes efficacy and toxicity.",
@@ -859,6 +964,7 @@ def generate_explanation(drug, primary_gene, diplotype, phenotype, risk_label, v
         ),
         "clinical_impact": recommendation,
         "citations": variant_citations,
+        "care_team_suggestions": fallback_suggestions,
         "model": "pharmaguard-explainer-v1",
     }
 
