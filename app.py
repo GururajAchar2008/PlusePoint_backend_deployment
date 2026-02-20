@@ -3,6 +3,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 
 import MySQLdb.cursors
@@ -406,6 +407,10 @@ def parse_int(value, default=0):
         return default
 
 
+def generate_user_uid():
+    return f"USR_{uuid.uuid4().hex[:16].upper()}"
+
+
 def serialize_department(row):
     return {
         "id": row["id"],
@@ -441,6 +446,7 @@ def serialize_patient(row):
 
     return {
         "id": row["id"],
+        "userId": row.get("user_uid") or "",
         "name": row["name"] or "",
         "age": row["age"] or 0,
         "gender": row["gender"] or "Male",
@@ -1110,11 +1116,25 @@ def upsert_patient(data):
     blood_group = str(data.get("bloodGroup", "")).strip()
     allergies = str(data.get("allergies", "")).strip()
     chronic_conditions = str(data.get("chronicConditions", "")).strip()
+    user_uid = str(data.get("userId") or data.get("user_uid") or "").strip()
+
+    if not user_uid:
+        user_uid = generate_user_uid()
 
     contact_for_db = contact if contact else None
-    patient_id = parse_int(data.get("id"), 0)
+    existing_by_uid = fetch_one("SELECT id FROM patients WHERE user_uid = %s", (user_uid,))
 
-    if patient_id > 0:
+    if contact_for_db:
+        contact_owner = fetch_one(
+            "SELECT user_uid FROM patients WHERE contact = %s LIMIT 1",
+            (contact_for_db,),
+        )
+        if contact_owner and contact_owner.get("user_uid") not in {"", None, user_uid}:
+            # Prevent cross-user overwrite when contact has already been claimed by another user id.
+            contact_for_db = None
+
+    if existing_by_uid:
+        patient_id = existing_by_uid["id"]
         execute_query(
             """
             UPDATE patients
@@ -1126,29 +1146,35 @@ def upsert_patient(data):
         )
         return patient_id
 
-    existing = None
-    if contact_for_db:
-        existing = fetch_one("SELECT id FROM patients WHERE contact = %s", (contact_for_db,))
-
-    if existing:
-        patient_id = existing["id"]
+    patient_id = parse_int(data.get("id"), 0)
+    if patient_id > 0:
         execute_query(
             """
             UPDATE patients
-            SET name = %s, age = %s, gender = %s,
+            SET user_uid = %s, name = %s, age = %s, gender = %s, contact = %s,
                 blood_group = %s, allergies = %s, chronic_conditions = %s
             WHERE id = %s
             """,
-            (name, age, gender, blood_group, allergies, chronic_conditions, patient_id),
+            (
+                user_uid,
+                name,
+                age,
+                gender,
+                contact_for_db,
+                blood_group,
+                allergies,
+                chronic_conditions,
+                patient_id,
+            ),
         )
         return patient_id
 
     return execute_query(
         """
-        INSERT INTO patients (name, age, gender, contact, blood_group, allergies, chronic_conditions)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO patients (user_uid, name, age, gender, contact, blood_group, allergies, chronic_conditions)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
-        (name, age, gender, contact_for_db, blood_group, allergies, chronic_conditions),
+        (user_uid, name, age, gender, contact_for_db, blood_group, allergies, chronic_conditions),
     )
 
 
@@ -1195,6 +1221,7 @@ def initialize_database():
         """
         CREATE TABLE IF NOT EXISTS patients (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            user_uid VARCHAR(80) UNIQUE,
             name VARCHAR(120),
             age INT,
             gender VARCHAR(20) DEFAULT 'Male',
@@ -1207,6 +1234,20 @@ def initialize_database():
         )
         """
     )
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = %s
+          AND TABLE_NAME = 'patients'
+          AND COLUMN_NAME = 'user_uid'
+        """,
+        (app.config["MYSQL_DB"],),
+    )
+    has_user_uid_column = bool(cursor.fetchone()[0])
+    if not has_user_uid_column:
+        cursor.execute("ALTER TABLE patients ADD COLUMN user_uid VARCHAR(80) UNIQUE AFTER id")
 
     cursor.execute(
         """
@@ -1414,11 +1455,30 @@ def analyze_pharmacogenomics():
 def get_latest_patient():
     row = fetch_one(
         """
-        SELECT id, name, age, gender, contact, blood_group, allergies, chronic_conditions
+        SELECT id, user_uid, name, age, gender, contact, blood_group, allergies, chronic_conditions
         FROM patients
         ORDER BY updated_at DESC
         LIMIT 1
         """
+    )
+
+    return jsonify({"patient": serialize_patient(row)})
+
+
+@app.route("/api/patients/by-user/<string:user_uid>", methods=["GET"])
+def get_patient_by_user(user_uid):
+    normalized_user_uid = str(user_uid or "").strip()
+    if not normalized_user_uid:
+        return jsonify({"patient": None})
+
+    row = fetch_one(
+        """
+        SELECT id, user_uid, name, age, gender, contact, blood_group, allergies, chronic_conditions
+        FROM patients
+        WHERE user_uid = %s
+        LIMIT 1
+        """,
+        (normalized_user_uid,),
     )
 
     return jsonify({"patient": serialize_patient(row)})
@@ -1431,7 +1491,7 @@ def save_patient():
 
     row = fetch_one(
         """
-        SELECT id, name, age, gender, contact, blood_group, allergies, chronic_conditions
+        SELECT id, user_uid, name, age, gender, contact, blood_group, allergies, chronic_conditions
         FROM patients
         WHERE id = %s
         """,
